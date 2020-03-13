@@ -11,8 +11,8 @@ repository = "https://github.com/jakubadamw/backoff-futures"
 edition = "2018"
 
 [dependencies]
-backoff = "0.1"
-tokio = { version = "0.2.1", features = ["time"] }
+backoff = "^0.1"
+tokio = { version = "^0.2.13", features = ["time", "macros", "rt-threaded"] }
 
 [dev-dependencies]
 futures = "0.3"

@@ -48,7 +48,9 @@
 //! See [`BackoffExt::with_backoff`] for more details.
 
 #[cfg(test)] #[macro_use] extern crate matches;
+// #[cfg(test)] #[macro_use] extern crate tokio;
 
+use tokio::time::Delay;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -106,8 +108,10 @@ impl<Fut, F, B, T, E> Future for BackoffFuture<'_, Fut, B, F>
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // The loop will be passed at most twice.
         loop {
-            match self.as_mut().state {
+            println!("Loop...");
+            match &self.as_mut().state {
                 BackoffState::Work(_) => {
+                    println!("Working...");
                     let fut = unsafe {
                         self.as_mut().map_unchecked_mut(|s| match s.state {
                             BackoffState::Work(ref mut f) => f,
@@ -116,18 +120,25 @@ impl<Fut, F, B, T, E> Future for BackoffFuture<'_, Fut, B, F>
                     };
         
                     match fut.poll(cx) {
-                        Poll::Pending => return Poll::Pending,
+                        Poll::Pending => {println!("Inner pending..."); return Poll::Pending},
 
                         Poll::Ready(value) => match value {
                             Ok(_) | Err(backoff::Error::Permanent(_)) =>
                                 return Poll::Ready(value),
 
                             Err(backoff::Error::Transient(_)) => unsafe {
+                                println!("Setting timer");
                                 let mut s = self.as_mut().get_unchecked_mut();
                                 match s.backoff.next_backoff() {
                                     Some(next) => {
-                                        let delay = tokio::time::delay_for(next);
+                                        let mut delay = tokio::time::delay_for(next);
+                                        println!("Setting delay to {:?}", next);
+                                        let _result = <Delay as Future>::poll(Pin::new(&mut delay), cx);
                                         s.state = BackoffState::Delay(delay);
+                                        // match result {
+                                        //     Poll::Pending => s.state = BackoffState::Delay(delay),
+                                        //     Poll::Ready(_) => s.state = BackoffState::Pending
+                                        // }
                                     }
                                     None =>
                                         return Poll::Ready(value)
@@ -137,10 +148,12 @@ impl<Fut, F, B, T, E> Future for BackoffFuture<'_, Fut, B, F>
                     }
                 }
 
-                BackoffState::Delay(ref delay) if !delay.is_elapsed() =>
-                    return Poll::Pending,
+                BackoffState::Delay(delay) if !delay.is_elapsed() =>
+                    {println!("Pending..."); return Poll::Pending;},
+                    //return Poll::Pending,
 
                 _ => unsafe {
+                    println!("Executing...");
                     let mut s = self.as_mut().get_unchecked_mut();
                     s.state = BackoffState::Work((s.f)());
                 }
@@ -151,8 +164,10 @@ impl<Fut, F, B, T, E> Future for BackoffFuture<'_, Fut, B, F>
 
 #[cfg(test)]
 mod tests {
+    use tokio::runtime::Builder;
     use futures::Future;
     use super::BackoffExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn test_when_future_succeeds() {
@@ -201,5 +216,47 @@ mod tests {
         let result: Result<u32, backoff::Error<()>> =
             futures::executor::block_on(do_work.with_backoff(&mut backoff));
         assert_eq!(result.ok(), Some(123));
+    }
+
+    #[test]
+    fn test_with_async_fn_when_future_returns_transient_error_run_with_threaded_scheduler() {
+        let atom = AtomicU32::new(1);
+        let do_work = || async {
+            let num = *(&atom.fetch_add(1, Ordering::SeqCst));
+            println!("Try number {:?}", num);
+            if num == 4 {
+                futures::future::ready(Ok(num)).await
+            } else {
+                println!("Returning Transient error");
+                futures::future::ready(Err(backoff::Error::Transient(()))).await
+            }
+        };
+        let mut runtime = Builder::new().threaded_scheduler().enable_time().build().unwrap();
+        println!("{:#?}", runtime);
+        let mut backoff = backoff::ExponentialBackoff::default();
+        let result: Result<u32, backoff::Error<()>> =
+            runtime.block_on(do_work.with_backoff(&mut backoff));
+        assert_eq!(result.ok(), Some(4));
+    }
+
+    #[test]
+    fn test_with_async_fn_when_future_returns_transient_error_run_with_basic_scheduler() {
+        let atom = AtomicU32::new(1);
+        let do_work = || async {
+            let num = *(&atom.fetch_add(1, Ordering::SeqCst));
+            println!("Try number {:?}", num);
+            if num == 4 {
+                futures::future::ready(Ok(num)).await
+            } else {
+                println!("Returning Transient error");
+                futures::future::ready(Err(backoff::Error::Transient(()))).await
+            }
+        };
+        let mut runtime = Builder::new().basic_scheduler().enable_time().build().unwrap();
+        println!("{:#?}", runtime);
+        let mut backoff = backoff::ExponentialBackoff::default();
+        let result: Result<u32, backoff::Error<()>> =
+            runtime.block_on(do_work.with_backoff(&mut backoff));
+        assert_eq!(result.ok(), Some(4));
     }
 }
